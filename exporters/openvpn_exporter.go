@@ -302,15 +302,15 @@ func (e *OpenVPNExporter) collectServerStatusFromReaderV245(statusPath string, f
 			currentHeader = "ROUTING_TABLE"
 		} else if fields[0] == "Updated" && len(fields) == 2 {
 			// Time at which the statistics were updated.
-			updatedTime, err := time.Parse("Mon Jan _2 15:04:05 2006", fields[1])
-			// timeStartStats, err := strconv.ParseFloat(fields[1], 64)
+			location, _ := time.LoadLocation("Local")
+			timeParser, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", fields[1], location)
 			if err != nil {
 				return err
 			}
 			ch <- prometheus.MustNewConstMetric(
 				e.openvpnStatusUpdateTimeDesc,
 				prometheus.GaugeValue,
-				float64(updatedTime.Unix()),
+				float64(timeParser.Unix()),
 				statusPath)
 		} else if fields[0] == "TITLE" && len(fields) == 2 {
 			// OpenVPN version number.
