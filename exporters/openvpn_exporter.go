@@ -4,13 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"github.com/prometheus/client_golang/prometheus"
 	"io"
 	"log"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type OpenvpnServerHeader struct {
@@ -163,6 +164,8 @@ func (e *OpenVPNExporter) collectStatusFromReader(statusPath string, file io.Rea
 	if bytes.HasPrefix(buf, []byte("TITLE,")) {
 		// Server statistics, using format version 2.
 		return e.collectServerStatusFromReader(statusPath, reader, ch, ",")
+	} else if bytes.HasPrefix(buf, []byte("OpenVPN CLIENT LIS")) {
+		return e.collectServerStatusFromReaderV245(statusPath, reader, ch, ",")
 	} else if bytes.HasPrefix(buf, []byte("TITLE\t")) {
 		// Server statistics, using format version 3. The only
 		// difference compared to version 2 is that it uses tabs
@@ -239,7 +242,112 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 			// Export relevant columns as individual metrics.
 			for _, metric := range header.Metrics {
 				if columnValue, ok := columnValues[metric.Column]; ok {
-					if l, _ := recordedMetrics[metric]; ! subslice(labels, l) {
+					if l, _ := recordedMetrics[metric]; !subslice(labels, l) {
+						value, err := strconv.ParseFloat(columnValue, 64)
+						if err != nil {
+							return err
+						}
+						ch <- prometheus.MustNewConstMetric(
+							metric.Desc,
+							metric.ValueType,
+							value,
+							labels...)
+						recordedMetrics[metric] = append(recordedMetrics[metric], labels...)
+					} else {
+						log.Printf("Metric entry with same labels: %s, %s", metric.Column, labels)
+					}
+				}
+			}
+		} else {
+			return fmt.Errorf("unsupported key: %q", fields[0])
+		}
+	}
+	// add the number of connected client
+	ch <- prometheus.MustNewConstMetric(
+		e.openvpnConnectedClientsDesc,
+		prometheus.GaugeValue,
+		float64(numberConnectedClient),
+		statusPath)
+	return scanner.Err()
+}
+
+// Converts OpenVPN server status information into Prometheus metrics.
+func (e *OpenVPNExporter) collectServerStatusFromReaderV245(statusPath string, file io.Reader, ch chan<- prometheus.Metric, separator string) error {
+	scanner := bufio.NewScanner(file)
+	scanner.Split(bufio.ScanLines)
+	headersFound := map[string][]string{}
+	// counter of connected client
+	numberConnectedClient := 0
+
+	recordedMetrics := map[OpenvpnServerHeaderField][]string{}
+
+	var currentHeader string
+	for scanner.Scan() {
+		fields := strings.Split(scanner.Text(), separator)
+		if (fields[0] == "OpenVPN CLIENT LIST" || fields[0] == "ROUTING TABLE") && len(fields) == 1 {
+		} else if fields[0] == "END" && len(fields) == 1 {
+			// Stats footer.
+		} else if fields[0] == "GLOBAL STATS" {
+			// Global server statistics.
+		} else if strings.HasPrefix(fields[0], "Max bcast/mcast") && len(fields) == 2 {
+			//Max bcast/mcast queue length,0
+		} else if (fields[0] == "Common Name") && len(fields) > 2 {
+			// headersFound["CLIENT_LIST"] = append([]string{"CLIENT_LIST"}, fields...)
+			headersFound["CLIENT_LIST"] = fields
+			currentHeader = "CLIENT_LIST"
+		} else if (fields[0] == "Virtual Address") && len(fields) > 2 {
+			// Column names for CLIENT_LIST and ROUTING_TABLE.
+			// headersFound["ROUTING_TABLE"] = append([]string{"ROUTING_TABLE"}, fields...)
+			headersFound["ROUTING_TABLE"] = fields
+			currentHeader = "ROUTING_TABLE"
+		} else if fields[0] == "Updated" && len(fields) == 2 {
+			// Time at which the statistics were updated.
+			updatedTime, err := time.Parse("Mon Jan _2 15:04:05 2006", fields[1])
+			// timeStartStats, err := strconv.ParseFloat(fields[1], 64)
+			if err != nil {
+				return err
+			}
+			ch <- prometheus.MustNewConstMetric(
+				e.openvpnStatusUpdateTimeDesc,
+				prometheus.GaugeValue,
+				float64(updatedTime.Unix()),
+				statusPath)
+		} else if fields[0] == "TITLE" && len(fields) == 2 {
+			// OpenVPN version number.
+		} else if header, ok := e.openvpnServerHeaders[currentHeader]; ok {
+			tmpHeader := currentHeader
+			currentHeader = ""
+			if tmpHeader == "CLIENT_LIST" {
+				numberConnectedClient++
+			}
+			// Entry that depends on a preceding HEADERS directive.
+			columnNames, ok := headersFound[tmpHeader]
+			if !ok {
+				return fmt.Errorf("%s should be preceded by HEADERS", tmpHeader)
+			}
+			if len(fields) != len(columnNames) {
+				return fmt.Errorf("HEADER for %s describes a different number of columns", tmpHeader)
+			}
+
+			// Store entry values in a map indexed by column name.
+			columnValues := map[string]string{}
+			for _, column := range header.LabelColumns {
+				columnValues[column] = ""
+			}
+			for i, column := range columnNames {
+				columnValues[column] = fields[i]
+			}
+
+			// Extract columns that should act as entry labels.
+			labels := []string{statusPath}
+			for _, column := range header.LabelColumns {
+				labels = append(labels, columnValues[column])
+			}
+
+			// Export relevant columns as individual metrics.
+			for _, metric := range header.Metrics {
+				if columnValue, ok := columnValues[metric.Column]; ok {
+					if l, _ := recordedMetrics[metric]; !subslice(labels, l) {
 						value, err := strconv.ParseFloat(columnValue, 64)
 						if err != nil {
 							return err
@@ -280,9 +388,11 @@ func contains(s []string, e string) bool {
 
 // Is a sub-slice of slice
 func subslice(sub []string, main []string) bool {
-	if len(sub) > len(main) {return false}
+	if len(sub) > len(main) {
+		return false
+	}
 	for _, s := range sub {
-		if ! contains(main, s) {
+		if !contains(main, s) {
 			return false
 		}
 	}
