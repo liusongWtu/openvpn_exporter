@@ -302,8 +302,8 @@ func (e *OpenVPNExporter) collectServerStatusFromReaderV245(statusPath string, f
 			currentHeader = "ROUTING_TABLE"
 		} else if fields[0] == "Updated" && len(fields) == 2 {
 			// Time at which the statistics were updated.
-			location, _ := time.LoadLocation("Local")
-			timeParser, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", fields[1], location)
+			// location, _ := time.LoadLocation("Local")
+			timeParser, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", fields[1], time.Local)
 			if err != nil {
 				return err
 			}
