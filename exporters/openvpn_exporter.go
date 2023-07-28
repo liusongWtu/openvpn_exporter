@@ -273,6 +273,64 @@ func (e *OpenVPNExporter) collectServerStatusFromReader(statusPath string, file 
 
 // Converts OpenVPN server status information into Prometheus metrics.
 func (e *OpenVPNExporter) collectServerStatusFromReaderV245(statusPath string, file io.Reader, ch chan<- prometheus.Metric, separator string) error {
+	var (
+		serverHeaderClientLabels        = []string{"status_path", "common_name", "connection_time", "real_address", "virtual_address", "username"}
+		serverHeaderClientLabelColumns  = []string{"Common Name", "Connected Since", "Real Address", "Virtual Address", "Username"}
+		serverHeaderRoutingLabels       = []string{"status_path", "common_name", "real_address", "virtual_address"}
+		serverHeaderRoutingLabelColumns = []string{"Common Name", "Real Address", "Virtual Address"}
+	)
+
+	openvpnServerHeaders := map[string]OpenvpnServerHeader{
+		"CLIENT_LIST": {
+			LabelColumns: serverHeaderClientLabelColumns,
+			Metrics: []OpenvpnServerHeaderField{
+				{
+					Column: "Bytes Received",
+					Desc: prometheus.NewDesc(
+						prometheus.BuildFQName("openvpn", "server", "client_received_bytes_total"),
+						"Amount of data received over a connection on the VPN server, in bytes.",
+						serverHeaderClientLabels, nil),
+					ValueType: prometheus.CounterValue,
+				},
+				{
+					Column: "Bytes Sent",
+					Desc: prometheus.NewDesc(
+						prometheus.BuildFQName("openvpn", "server", "client_sent_bytes_total"),
+						"Amount of data sent over a connection on the VPN server, in bytes.",
+						serverHeaderClientLabels, nil),
+					ValueType: prometheus.CounterValue,
+				},
+				{
+					Column: "Connected Since",
+					Desc: prometheus.NewDesc(
+						prometheus.BuildFQName("openvpn", "server", "route_connected_since_time_seconds"),
+						"Time at which a route was connected since, in seconds.",
+						serverHeaderClientLabels, nil),
+					ValueType: prometheus.GaugeValue,
+				},
+			},
+		},
+		"ROUTING_TABLE": {
+			LabelColumns: serverHeaderRoutingLabelColumns,
+			Metrics: []OpenvpnServerHeaderField{
+				{
+					Column: "Last Ref",
+					Desc: prometheus.NewDesc(
+						prometheus.BuildFQName("openvpn", "server", "route_last_reference_time_seconds"),
+						"Time at which a route was last referenced, in seconds.",
+						serverHeaderRoutingLabels, nil),
+					ValueType: prometheus.GaugeValue,
+				},
+			},
+		},
+	}
+	e.openvpnServerHeaders = openvpnServerHeaders
+
+	timeFields := map[string]struct{}{
+		"Last Ref":        struct{}{},
+		"Connected Since": struct{}{},
+	}
+
 	scanner := bufio.NewScanner(file)
 	scanner.Split(bufio.ScanLines)
 	headersFound := map[string][]string{}
@@ -316,7 +374,7 @@ func (e *OpenVPNExporter) collectServerStatusFromReaderV245(statusPath string, f
 			// OpenVPN version number.
 		} else if header, ok := e.openvpnServerHeaders[currentHeader]; ok {
 			tmpHeader := currentHeader
-			currentHeader = ""
+			// currentHeader = ""
 			if tmpHeader == "CLIENT_LIST" {
 				numberConnectedClient++
 			}
@@ -344,14 +402,25 @@ func (e *OpenVPNExporter) collectServerStatusFromReaderV245(statusPath string, f
 				labels = append(labels, columnValues[column])
 			}
 
+			var err error
 			// Export relevant columns as individual metrics.
 			for _, metric := range header.Metrics {
 				if columnValue, ok := columnValues[metric.Column]; ok {
 					if l, _ := recordedMetrics[metric]; !subslice(labels, l) {
-						value, err := strconv.ParseFloat(columnValue, 64)
-						if err != nil {
-							return err
+						var value float64
+						if _, ok := timeFields[metric.Column]; ok {
+							timeParser, err := time.ParseInLocation("Mon Jan 2 15:04:05 2006", columnValue, time.Local)
+							if err != nil {
+								return err
+							}
+							value = float64(timeParser.Unix())
+						} else {
+							value, err = strconv.ParseFloat(columnValue, 64)
+							if err != nil {
+								return err
+							}
 						}
+
 						ch <- prometheus.MustNewConstMetric(
 							metric.Desc,
 							metric.ValueType,
