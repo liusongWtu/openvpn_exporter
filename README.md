@@ -92,6 +92,11 @@ docker run -p 9176:9176 \
 Metrics should be available at http://localhost:9176/metrics.
 
 ## Get a standalone executable binary
+compile
+```sh
+env CC=x86_64-linux-gnu-gcc CGO_ENABLED=1  GOOS=linux  GOARCH=amd64 \
+          go build -o  openvpn_exporter main.go
+```          
 
 You can download the pre-compiled binaries from the
 [releases page](https://github.com/kumina/openvpn_exporter/releases).
